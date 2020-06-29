@@ -161,6 +161,7 @@ struct EmojiArtDocumentView: View {
                         // showing a image that might be nil
                         OptionalImage(uiImage: self.document.backgroundImage)
                             .scaleEffect(self.zoomScale)
+                            .offset(self.panOffset)
                     )
                         .gesture(self.doubleTapToZoom(in: geometry.size))
                     ForEach(self.document.emojis) { emoji in
@@ -172,6 +173,7 @@ struct EmojiArtDocumentView: View {
                 // all contents show be in the space offerded
                 .clipped()
                 .gesture(self.zoomGesture())
+                .gesture(self.panGesture())
                 // only draw on save area
                 .edgesIgnoringSafeArea([.horizontal, .bottom])
                 // "puclic.image" is URI
@@ -180,6 +182,7 @@ struct EmojiArtDocumentView: View {
                 .onDrop(of: ["public.image", "public.text"], isTargeted: nil) { providers, location in
                     var location = geometry.convert(location, from: .global) // upper-left in this geometry
                     location = CGPoint(x: location.x - geometry.size.width/2, y: location.y - geometry.size.height/2)
+                    location = CGPoint(x: location.x - self.panOffset.width, y: location.y - self.panOffset.height)
                     location = CGPoint(x: location.x / self.zoomScale, y: location.y / self.zoomScale)
                     print("dropping emoji at \(location), from origin \(geometry.convert(location, from: .global)), zoomScale = \(self.zoomScale)")
                     return self.drop(providers: providers, at: location)
@@ -221,16 +224,34 @@ struct EmojiArtDocumentView: View {
         if let image = image, image.size.width > 0, image.size.height > 0 {
             let hZoom = size.width / image.size.width
             let vZoom = size.height / image.size.height
+            self.steadyStatePanOffset = .zero
             self.steadyStateZoomScale = min(hZoom, vZoom)
         }
     }
     
-    // TODO: Gesture Pan
+    @State private var steadyStatePanOffset: CGSize = .zero
+    @GestureState private var gesturePanOffset: CGSize = .zero
+    
+    private var panOffset: CGSize {
+        (steadyStatePanOffset + gesturePanOffset) * zoomScale
+    }
+    
+    private func panGesture() -> some Gesture {
+        DragGesture()
+            .updating($gesturePanOffset) { latestDragGestureValue, gesturePanOffset, transaction in
+                gesturePanOffset = latestDragGestureValue.translation / self.zoomScale
+            }
+        .onEnded { finalDragGestureValue in
+            self.steadyStatePanOffset = self.steadyStatePanOffset + (finalDragGestureValue.translation / self.zoomScale)
+        }
+    }
+    
     
     private func position(for emoji: EmojiArt.Emoji, in size: CGSize) -> CGPoint {
         var location = emoji.location
         location = CGPoint(x: location.x * zoomScale, y: location.y * zoomScale)
         location = CGPoint(x: emoji.location.x + size.width/2, y: emoji.location.y + size.height/2)
+        location = CGPoint(x: location.x + panOffset.width, y: location.y + panOffset.height)
         return location
     }
     
