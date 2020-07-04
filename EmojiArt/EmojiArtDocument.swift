@@ -7,26 +7,23 @@
 //
 
 import SwiftUI
+import Combine
 
 class EmojiArtDocument: ObservableObject {
     static let palette: String = "🚐🚣🏼👻🍎🦒"
     
-    // @Published // workaround for property observer problem with property wrappers
-    private var emojiArt: EmojiArt {
-        willSet { objectWillChange.send() }
-        didSet {
-            // print out the json encoded information everytime the model is changed
-            // print("json = \(emojiArt.json? .utf8 ?? "nil")")
-            // everytime changes happen, save to UserDefault
-            // whan it to actually write to disk, you need to switch to another app then switch back
-            UserDefaults.standard.set(emojiArt.json, forKey: EmojiArtDocument.untitled)
-        }
-    }
+    @Published private var emojiArt: EmojiArt
     
     private static let untitled = "EmojiArtDocument.Untitled"
     
+    private var autosaveCancellable: AnyCancellable?
+    
     init() {
         emojiArt = EmojiArt(json: UserDefaults.standard.data(forKey: EmojiArtDocument.untitled)) ?? EmojiArt()
+        autosaveCancellable = $emojiArt.sink { emojiArt in
+            print("\(emojiArt.json?.utf8 ?? "nil")")
+            UserDefaults.standard.set(emojiArt.json, forKey: EmojiArtDocument.untitled)
+        }
         fetchBackgroundImageData()
     }
     
@@ -53,27 +50,30 @@ class EmojiArtDocument: ObservableObject {
         }
     }
     
-    func setBackgroundURL(_ url: URL?) {
-        emojiArt.backgroundURL = url?.imageURL
-        fetchBackgroundImageData()
+    var backgroundURL: URL? {
+        get {
+            emojiArt.backgroundURL
+        }
+        set {
+            emojiArt.backgroundURL = newValue?.imageURL
+            fetchBackgroundImageData()
+        }
     }
+    
+    private var fetchImagaCancellable: AnyCancellable?
     
     private func fetchBackgroundImageData() {
         // initial it to nil in case network is very slow
         backgroundImage = nil
         if let url = self.emojiArt.backgroundURL {
-            // post the code into a background queue
-            DispatchQueue.global(qos: .userInitiated).async {
-                // try: exception handling
-                if let imageData = try? Data(contentsOf: url) {
-                    DispatchQueue.main.async {
-                        // if user select another url before this fetching is done
-                        if url == self.emojiArt.backgroundURL {
-                            self.backgroundImage = UIImage(data: imageData)
-                        }
-                    }
-                }
-            }
+            fetchImagaCancellable?.cancel() // cancel the previous fetching
+            // !!! very important usage of cancellable
+            // publish the data from the url
+            fetchImagaCancellable = URLSession.shared.dataTaskPublisher(for: url) // backgroud queue
+                .map { data, urlResponse in UIImage(data: data) } // map the returned type to UIImage
+                .receive(on: DispatchQueue.main) // publish it to the main queue
+                .replaceError(with: nil)
+                .assign(to: \.backgroundImage, on: self)
         }
     }
 }

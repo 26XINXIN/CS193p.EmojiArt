@@ -126,30 +126,123 @@
 //      this is the only way to change @GestureState, because it changes only when animation
 //      ignoring transaction here
 //      .onChanged can not modify @GestureState, used when don't tracking states, e.g. finger like a pen
-//
 
+
+// Property Wrappers (a kind of syntactic suger)
+// are essentially a struct
+// apply some behaviors to the vars they wrap
+//  @State: make a var live in the heap
+//  @Published: make a var publish its changes
+//  @ObservedObject: causing a View to redraw when a published change is detected
+// How it works:
+//  @Published var emojiArt: EmojiArt = EmojiArt()
+//  ====>
+//  struct Pushlished {
+//      var wrappedValue: EmojiArt
+//      var projectedValue: Publisher<EmojiArt, Never>
+//      ...
+//  }
+//  var _emojiArt: Published = Published(wrappedValue: EmojiArt())
+//  var emojiArt: EmojiArt {
+//      get { _emojiArt.wrappedValue }
+//      set { _emojiArt.wrappedValue = newValue }
+//  }
+//  access to projectedValue via $emojiArt
+//  projectedValue type is up to the Property Wrapper,
+//  it is responsible for periodically publish the changes on EmojiArt struct
+// Why wrapper: it does something then the wrappedValue is set/get
+// @State: store the wrapped value in the heap
+//  it's projectedValue is a Binding, which binds a value to another
+// @ObservedObject: invalidate the View when wrappedValue does objectWillChange.send()
+//  projectedValue is a Binding, var in the View and the var in the ViewModel
+// @Binding: the wrappedValue is a value bound to something else
+//  gets/sets the value of the wrappedValue from some other source
+//  when the bound value changes, it invalidate the View,
+//  projectedValue: self
+// Where to use Binding?
+//  Many places --> it ensures only one valid source of data, bound to same information
+// e.g.
+//    struct MyView: View {
+//        @State var myString = "Hello" // only @State or @ObservedObject in View is modifiable
+//        var body: View {
+//            OtherView(sharedText: $myString) // use dollar sign here
+//        }
+//    }
+//    struct OtherView: View {
+//        @Binding var sharedText: String
+//        var body: View {
+//            Text(sharedText)
+//        }
+//    }
+// Different Bindings:
+//  * Can bind to vars,
+//  * can bind to constants: OtherView(sharedText: .constant("Howdy"))
+//  * can have computed binding: Binding(get:, set:)
+// @EnvironmentBoject: similar to @ObservedObject
+// let myView = myView().environmentObject(theViewModel) // setting environment with a modifier
+// @EnvironmentObject var viewModel: ViewModelCllass
+// @EnvironmentBoject v.s. @ObservedObject
+// .environmentBoject propagates the environment to all the subViews in the body
+//  what it do: same as @ObservedObject, projectedValue: a Binding
+//  @Environment is totally different from @EnvironmentObject
+//  Wrappers may have parameters:
+//      @Environment(\.colorScheme) var colorScheme // here keyPath = EnvironmentValues.colorScheme
+//  @Environment:
+//      wrappedValue: the value of some var in EnvironmentValues
+//      sets/gets a vlue of some var in EnvironmentValues
+//      projectedValue: nil
+//  TODO: - keyPath == wrappedValue?
+//  Publisher<Output, Failure> where Failure implements Error
+//      Output: the published type
+//      Failure: the type of thing it communicates if it fails while trying to publish
+//          if Publisher doesn't deal with Errors, the Failure can be Never
+//  How to use Publisher: subscribe to it, transform its values on the fly, shuttle its values off to somewhere else
+// Listening to a Publisher (subscribing)
+// One way: closure:
+//    cancellable = myPublisher.sink(
+//        receiveCompletion: { value in ... } // value is success or failure
+//        receiveValue: { thingThePublisherPublishes in ... } // the value the publisher emitted
+//    )
+//    it returns a Cancellable protocol
+//    cancellable.cancel() to stop listening to the publisher
+//    and it keeps .sink alive
+// Another way: View can listen to a Publisher:
+//    .onReceive(publisher) { thingThePublisherPublishes in
+//      // do something
+//    }
+// Some publishers:
+//  $ in front of vars marked as @Publihed
+//  URLSession's dataTaskPublisher
+//  Timer's publish
+//  NotificationCenter's publisher
 
 import SwiftUI
 
 struct EmojiArtDocumentView: View {
     @ObservedObject var document: EmojiArtDocument
     
+    @State private var chosenPalette: String = ""
+    
     var body: some View {
         VStack{
-            // make it scroll
-            ScrollView(.horizontal){
-                HStack {
-                    // map {String($0)} take a single char and turn it into a string
-                    // '\' is key path, directing to the correct object instance
-                    ForEach(EmojiArtDocument.palette.map {String($0)}, id: \.self) { emoji in
-                        Text(emoji)
-                            .font(Font.system(size: self.defaultEmojiSize))
-                            // NS-thing is from Objective-C
-                            .onDrag { return NSItemProvider(object: emoji as NSString) }
+            HStack {
+                PaletteChooser(document: document, chosenPalette: $chosenPalette)
+                // the projectedValue of @State is @Binding
+                // make it scroll
+                ScrollView(.horizontal){
+                    HStack {
+                        // map {String($0)} take a single char and turn it into a string
+                        // '\' is key path, directing to the correct object instance
+                        ForEach(self.chosenPalette.map {String($0)}, id: \.self) { emoji in
+                            Text(emoji)
+                                .font(Font.system(size: self.defaultEmojiSize))
+                                // NS-thing is from Objective-C
+                                .onDrag { return NSItemProvider(object: emoji as NSString) }
+                        }
                     }
                 }
+                .onAppear { self.chosenPalette = self.document.defaultPalette }
             }
-                .padding(.horizontal) // setting the scroll space
             // Here will be our model
             // Our model's state is the background and
             // all the emojis on it and their position and size
@@ -164,11 +257,16 @@ struct EmojiArtDocumentView: View {
                             .offset(self.panOffset)
                     )
                         .gesture(self.doubleTapToZoom(in: geometry.size))
-                    ForEach(self.document.emojis) { emoji in
-                        Text(emoji.text)
-                            .font(animatableWithSize: self.zoomScale)
-                            .position(self.position(for: emoji, in: geometry.size))
+                    if self.isLoading {
+                        Image(systemName: "timer").imageScale(.large).spinning()
+                    } else {
+                        ForEach(self.document.emojis) { emoji in
+                            Text(emoji.text)
+                                .font(animatableWithSize: self.zoomScale)
+                                .position(self.position(for: emoji, in: geometry.size))
+                        }
                     }
+                    
                 }
                 // all contents show be in the space offerded
                 .clipped()
@@ -176,6 +274,9 @@ struct EmojiArtDocumentView: View {
                 .gesture(self.panGesture())
                 // only draw on save area
                 .edgesIgnoringSafeArea([.horizontal, .bottom])
+                .onReceive(self.document.$backgroundImage) { image in
+                    self.zoomToFit(image, in: geometry.size)
+                }
                 // "puclic.image" is URI
                 // isTargeted is binding
                 // provider: NSItemProvider
@@ -189,6 +290,10 @@ struct EmojiArtDocumentView: View {
                 }
             }
         }
+    }
+    
+    var isLoading: Bool {
+        document.backgroundURL != nil && document.backgroundImage == nil
     }
     
     private func doubleTapToZoom(in size: CGSize) -> some Gesture {
@@ -246,7 +351,7 @@ struct EmojiArtDocumentView: View {
         }
     }
     
-    
+    // something wrong here maybe
     private func position(for emoji: EmojiArt.Emoji, in size: CGSize) -> CGPoint {
         var location = emoji.location
         location = CGPoint(x: location.x * zoomScale, y: location.y * zoomScale)
@@ -259,7 +364,7 @@ struct EmojiArtDocumentView: View {
         // load the image from url
         var found = providers.loadFirstObject(ofType: URL.self) { url in
             print("dropped \(url)")
-            self.document.setBackgroundURL(url)
+            self.document.backgroundURL = url
         }
         if !found {
             found = providers.loadObjects(ofType: String.self) { string in
